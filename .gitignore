@@ -1,0 +1,26 @@
+# Environment variables & secrets
+.env
+backend/.env
+*.env
+serviceAccountKey.json
+
+# Dependencies
+node_modules/
+dist/
+build/
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+.venv/
+env/
+
+# System / OneDrive files
+desktop.ini
+Thumbs.db
+.DS_Store
+
+# Large ML model binaries (can be generated via backend/train_and_export.py)
+*.pkl
+*.joblib
+*.h5

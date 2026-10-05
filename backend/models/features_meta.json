@@ -1,0 +1,40 @@
+{
+  "version": "1.0-July2026",
+  "features": [
+    "ph",
+    "temperature",
+    "turbidity",
+    "DO",
+    "BOD",
+    "ph_sq",
+    "temp_sq",
+    "turb_sq",
+    "ph_temp",
+    "ph_turb",
+    "temp_turb"
+  ],
+  "species": [
+    "karpio",
+    "katla",
+    "koi",
+    "magur",
+    "pangas",
+    "prawn",
+    "rui",
+    "shrimp",
+    "silverCup",
+    "sing",
+    "tilapia"
+  ],
+  "herbs": [
+    "Coriander",
+    "Lettuce / Greens",
+    "Oregano",
+    "Peppermint",
+    "Rosemary",
+    "Sweet Basil",
+    "Water Spinach"
+  ],
+  "cv_accuracy": 86.61,
+  "test_accuracy": 86.36
+}
