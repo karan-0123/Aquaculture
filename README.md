@@ -35,7 +35,7 @@ graph TD
     end
 
     subgraph ML_Backend["ML & Analytical Backend"]
-        CSV[("Augmented Dataset\n1500+ records, 11 species")] --> Training["Ensemble Model Training\n(RF + ExtraTrees)"]
+        CSV[("Augmented Dataset\n4399+ records, 11 species")] --> Training["Ensemble Model Training\n(RF + ExtraTrees)"]
         Training --> Models["Exported Models & Stats\nfish_model.pkl\nfish_species_stats.pkl"]
         Models --> Flask["Flask REST API\n(/predict, /status)"]
     end
