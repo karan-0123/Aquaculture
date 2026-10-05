@@ -85,7 +85,7 @@ graph TD
 ## 🤖 Machine Learning Architecture
 
 ### 1. Dataset & Supported Species
-- **Source Dataset:** `fish_dataset_clean_augmented.csv` (1,500+ records)
+- **Source Dataset:** `fish_dataset_clean_augmented.csv` (4399+ records)
 - **11 Cultivable Fish Species:**
   - `Tilapia`, `Rui`, `Pangas`, `Silver Cup`, `Katla`, `Sing`, `Shrimp`, `Karpio`, `Prawn`, `Koi`, `Magur`
 - **Data Augmentation:** Sensor-grade Gaussian noise injection based on real hardware tolerance:
@@ -278,7 +278,5 @@ const firebaseConfig = {
 
 ---
 
-## 👥 Contributors & Acknowledgements
-
-- **Project Lead & Author:** Sahil Prakash Bhagat (July 2026)
+## Tools Used
 - Built with open-source tools: [scikit-learn](https://scikit-learn.org/), [Flask](https://flask.palletsprojects.com/), [Firebase](https://firebase.google.com/), and [Mobizt FirebaseESP8266](https://github.com/mobizt/Firebase-ESP8266).
