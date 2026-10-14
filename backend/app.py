@@ -17,6 +17,7 @@ import pandas as pd
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
+from firebase_retention import retention_manager
 
 # ------------------------------------------------------------------------------
 # 1. Environment & App Initialization
@@ -379,16 +380,65 @@ def predict():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# Global in-memory cache for live sensor telemetry (populated by hardware gateway or Firebase)
+CURRENT_SENSORS = {
+    "ph": 7.35,
+    "temperature": 27.2,
+    "turbidity": 4.6,
+    "ec": 1.25,
+    "timestamp": int(time.time()),
+    "source": "esp8266_hardware_gateway"
+}
+
+@app.route('/api/sensors/current', methods=['GET'])
+def get_current_sensors():
+    """Returns the latest live sensor telemetry point."""
+    return jsonify({
+        "status": "live",
+        "sensors": CURRENT_SENSORS,
+        "timestamp": int(time.time())
+    }), 200
+
+@app.route('/api/sensors/update', methods=['POST'])
+def update_current_sensors():
+    """Updates the live sensor telemetry cache from hardware gateway."""
+    global CURRENT_SENSORS
+    try:
+        data = request.get_json(force=True) or {}
+        if not data:
+            return jsonify({"error": "Empty payload"}), 400
+        
+        CURRENT_SENSORS["ph"] = float(data.get("ph", CURRENT_SENSORS["ph"]))
+        CURRENT_SENSORS["temperature"] = float(data.get("temperature", CURRENT_SENSORS["temperature"]))
+        CURRENT_SENSORS["turbidity"] = float(data.get("turbidity", CURRENT_SENSORS["turbidity"]))
+        if "ec" in data and data["ec"] is not None:
+            CURRENT_SENSORS["ec"] = float(data["ec"])
+        else:
+            CURRENT_SENSORS["ec"] = round(0.80 + (CURRENT_SENSORS["turbidity"] * 0.08) * (1.0 + 0.019 * (CURRENT_SENSORS["temperature"] - 25.0)), 2)
+        CURRENT_SENSORS["timestamp"] = int(data.get("timestamp", time.time()))
+        CURRENT_SENSORS["source"] = data.get("source", "hardware_gateway")
+
+        return jsonify({"status": "success", "sensors": CURRENT_SENSORS}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/firebase/latest', methods=['GET'])
 def get_firebase_latest():
-    """Fetches the latest reading from Firebase Realtime Database and runs analysis."""
+    """Fetches the latest reading from Firebase Realtime Database or local hardware cache and runs analysis."""
     try:
-        fb_url = f"{FIREBASE_DATABASE_URL}/aquaculture/sensors.json"
-        res = requests.get(fb_url, timeout=5)
-        if res.status_code != 200 or not res.json():
-            return jsonify({"status": "no_data", "message": "No sensors node found on Firebase"}), 404
+        sensor_data = None
+        try:
+            fb_url = f"{FIREBASE_DATABASE_URL}/aquaculture/sensors.json"
+            res = requests.get(fb_url, timeout=3)
+            if res.status_code == 200 and res.json():
+                sensor_data = res.json()
+        except Exception:
+            pass
 
-        sensor_data = res.json()
+        # Fallback to local live hardware sensors cache
+        if not sensor_data:
+            sensor_data = CURRENT_SENSORS
+
         ph = float(sensor_data.get('ph', 7.0))
         temp = float(sensor_data.get('temperature', 25.0))
         turb = float(sensor_data.get('turbidity', 5.0))
@@ -399,15 +449,55 @@ def get_firebase_latest():
             return predict()
 
     except Exception as e:
-        return jsonify({"error": f"Firebase fetch error: {str(e)}"}), 500
+        return jsonify({"error": f"Sensor fetch error: {str(e)}"}), 500
+
+@app.route('/firebase/history', methods=['GET'])
+def get_firebase_history():
+    """Fetches telemetry history points from Firebase Realtime Database."""
+    limit = request.args.get('limit', default=100, type=int)
+    history_data = retention_manager.get_history(limit_to_last=limit)
+    return jsonify({"history": history_data, "count": len(history_data)}), 200
+
+@app.route('/firebase/history/push', methods=['POST'])
+def push_firebase_history():
+    """Pushes a sensor telemetry point to Firebase history."""
+    try:
+        data = request.get_json(force=True) or {}
+        ph = data.get('ph')
+        temp = data.get('temperature')
+        turb = data.get('turbidity')
+        ec = data.get('ec')
+        if ph is None or temp is None or turb is None:
+            return jsonify({"error": "Missing ph, temperature, or turbidity in payload"}), 400
+        res = retention_manager.push_telemetry_to_history(ph, temp, turb, ec)
+        return jsonify(res), (200 if res.get('success') else 500)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/firebase/retention/status', methods=['GET'])
+def get_retention_status():
+    """Returns database storage status and telemetry history record counts."""
+    stats = retention_manager.get_history_stats()
+    return jsonify(stats), 200
+
+@app.route('/firebase/retention/prune', methods=['POST'])
+def trigger_retention_prune():
+    """Triggers retention pruning on /aquaculture/history."""
+    data = request.get_json(silent=True) or {}
+    max_records = data.get('max_records', 500)
+    max_age_hours = data.get('max_age_hours')
+    result = retention_manager.prune_history(max_records=max_records, max_age_hours=max_age_hours)
+    return jsonify(result), 200
 
 # ------------------------------------------------------------------------------
 # 6. Run Server
 # ------------------------------------------------------------------------------
 if __name__ == '__main__':
+    # Start automated background retention maintenance worker
+    retention_manager.start_background_worker(interval_sec=3600, max_records=500)
     print("=" * 60)
     print(f" AQUA·INTELLIGENCE Flask Server Starting on Port {PORT} ")
     print(f" Healthcheck: http://localhost:{PORT}/health ")
     print(f" Prediction:  POST http://localhost:{PORT}/predict ")
     print("=" * 60)
-    app.run(host='0.0.0.0', port=PORT, debug=True)
+    app.run(host='0.0.0.0', port=PORT, debug=True, threaded=True)

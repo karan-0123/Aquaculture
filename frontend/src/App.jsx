@@ -8,9 +8,10 @@ import TelemetryGauges  from './components/TelemetryGauges.jsx';
 import PredictionHero   from './components/PredictionHero.jsx';
 import AnalyticsCharts  from './components/AnalyticsCharts.jsx';
 import WaterAdvisory    from './components/WaterAdvisory.jsx';
-import SpeciesMatrix    from './components/SpeciesMatrix.jsx';
-import SimulationStudio from './components/SimulationStudio.jsx';
-import StaleDataModal   from './components/StaleDataModal.jsx';
+import SpeciesMatrix        from './components/SpeciesMatrix.jsx';
+import SimulationStudio     from './components/SimulationStudio.jsx';
+import StaleDataModal       from './components/StaleDataModal.jsx';
+import CalibrationDiagnostics from './components/CalibrationDiagnostics.jsx';
 
 import { useAquacultureStream } from './hooks/useAquacultureStream.js';
 
@@ -18,10 +19,11 @@ const DEFAULT_MANUAL = { ph: 7.2, temperature: 27.5, turbidity: 4.8 };
 
 /* ── Tab definitions ── */
 const TABS = [
-  { id: 'overview',   label: '🌊 Overview'   },
-  { id: 'analytics',  label: '📈 Analytics'  },
-  { id: 'advisory',   label: '🩺 Advisory'   },
-  { id: 'species',    label: '🐠 Species'    },
+  { id: 'overview',    label: '🌊 Overview'    },
+  { id: 'analytics',   label: '📈 Analytics'   },
+  { id: 'advisory',    label: '🩺 Advisory'    },
+  { id: 'species',     label: '🐠 Species'     },
+  { id: 'calibration', label: '🛠️ Calibration' },
 ];
 
 /* ── Toast Notification ── */
@@ -365,6 +367,19 @@ export default function App() {
                   />
                 )}
               </div>
+            </motion.div>
+          )}
+
+          {/* ── CALIBRATION & DIAGNOSTICS TAB ── */}
+          {activeTab === 'calibration' && (
+            <motion.div
+              key="calibration"
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y:  0 }}
+              exit={{   opacity: 0, y: -8 }}
+              transition={{ duration: 0.4 }}
+            >
+              <CalibrationDiagnostics sensors={sensors} connectionState={connectionState} />
             </motion.div>
           )}
         </AnimatePresence>

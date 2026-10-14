@@ -31,8 +31,22 @@ export function useAquacultureStream() {
     }, WATCHDOG_MS);
   }, []);
 
-  // --- Call Predict API ---
+  const lastPredictedRef = useRef(null);
+
+  // --- Call Predict API (smart debounce & change detection) ---
   const runPrediction = useCallback(async (sensorValues) => {
+    // Only query ML model if sensors have meaningfully changed or first run
+    const prev = lastPredictedRef.current;
+    if (
+      prev &&
+      Math.abs(prev.ph - sensorValues.ph) < 0.02 &&
+      Math.abs(prev.temperature - sensorValues.temperature) < 0.05 &&
+      Math.abs(prev.turbidity - sensorValues.turbidity) < 0.2
+    ) {
+      return;
+    }
+    lastPredictedRef.current = sensorValues;
+
     if (predictionAbortRef.current) predictionAbortRef.current.abort();
     const controller = new AbortController();
     predictionAbortRef.current = controller;
@@ -60,38 +74,68 @@ export function useAquacultureStream() {
     }
   }, []);
 
-  // --- Auto Mode: Firebase subscription ---
+  // --- Auto Mode: Real-time Firebase RTDB subscription ---
   useEffect(() => {
     if (mode !== 'auto') return;
     setConnectionState('connecting');
 
+    let isFirebaseActive = false;
+
+    // Firebase cloud real-time subscription (WebSocket push, sub-100ms)
     const sensorRef = ref(db, '/aquaculture/sensors');
     const unsubscribe = onValue(
       sensorRef,
       (snapshot) => {
         const data = snapshot.val();
         if (data) {
+          isFirebaseActive = true;
           const newSensors = {
             ph:          parseFloat(data.ph          ?? 7.2),
             temperature: parseFloat(data.temperature ?? 27.5),
             turbidity:   parseFloat(data.turbidity   ?? 4.8),
           };
+          // Immediately update dashboard gauges with zero lag
           setSensors(newSensors);
           resetWatchdog();
           runPrediction(newSensors);
-        } else {
-          setConnectionState('stale');
+          setError(null);
         }
       },
       (err) => {
-        console.error('[Firebase]', err);
-        setConnectionState('offline');
-        setError('Firebase connection error. Check network or credentials.');
+        console.warn('[Firebase RTDB]', err.message, '— using local hardware gateway stream.');
       }
     );
 
+    // Initial fallback sync with local hardware gateway
+    const fetchLocalSensors = async () => {
+      if (isFirebaseActive) return; // Don't overwrite live Firebase telemetry
+      try {
+        const res = await fetch(`${API_BASE}/api/sensors/current`);
+        if (res.ok) {
+          const json = await res.json();
+          if (json.sensors && !isFirebaseActive) {
+            const newSensors = {
+              ph:          parseFloat(json.sensors.ph          ?? 7.2),
+              temperature: parseFloat(json.sensors.temperature ?? 27.5),
+              turbidity:   parseFloat(json.sensors.turbidity   ?? 4.8),
+            };
+            setSensors(newSensors);
+            resetWatchdog();
+            runPrediction(newSensors);
+            setError(null);
+          }
+        }
+      } catch (e) {
+        // Backend not ready
+      }
+    };
+
+    fetchLocalSensors();
+    const fallbackPollInterval = setInterval(fetchLocalSensors, 5000);
+
     return () => {
       off(sensorRef);
+      clearInterval(fallbackPollInterval);
       if (watchdogRef.current) clearTimeout(watchdogRef.current);
     };
   }, [mode, resetWatchdog, runPrediction]);

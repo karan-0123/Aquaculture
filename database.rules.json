@@ -1,0 +1,114 @@
+{
+  "rules": {
+    "aquaculture": {
+      // Allow read access for public monitoring dashboards & analytics clients
+      ".read": true,
+
+      // Live Telemetry Node
+      "sensors": {
+        // Writes strictly restricted to authenticated edge hardware or backend services
+        ".write": "auth != null",
+        ".validate": "newData.hasChildren(['ph', 'temperature', 'turbidity'])",
+        
+        "ph": {
+          ".validate": "newData.isNumber() && newData.val() >= 0.0 && newData.val() <= 14.0"
+        },
+        "temperature": {
+          ".validate": "newData.isNumber() && newData.val() >= -10.0 && newData.val() <= 60.0"
+        },
+        "turbidity": {
+          ".validate": "newData.isNumber() && newData.val() >= 0.0 && newData.val() <= 1000.0"
+        },
+        "ec": {
+          ".validate": "!newData.exists() || (newData.isNumber() && newData.val() >= 0.0 && newData.val() <= 20.0)"
+        },
+        "timestamp": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "$other": {
+          ".validate": false
+        }
+      },
+
+      // Historical Timeseries Telemetry Node
+      "history": {
+        // Read access allowed for dashboard charts & reporting
+        ".read": true,
+        // Writes strictly restricted to authenticated edge hardware or backend services
+        ".write": "auth != null",
+        // Indexed on timestamp for efficient range queries and chronological pruning
+        ".indexOn": ["timestamp"],
+        
+        "$pushId": {
+          ".validate": "newData.hasChildren(['ph', 'temperature', 'turbidity'])",
+          "ph": {
+            ".validate": "newData.isNumber() && newData.val() >= 0.0 && newData.val() <= 14.0"
+          },
+          "temperature": {
+            ".validate": "newData.isNumber() && newData.val() >= -10.0 && newData.val() <= 60.0"
+          },
+          "turbidity": {
+            ".validate": "newData.isNumber() && newData.val() >= 0.0 && newData.val() <= 1000.0"
+          },
+          "ec": {
+            ".validate": "!newData.exists() || (newData.isNumber() && newData.val() >= 0.0 && newData.val() <= 20.0)"
+          },
+          "timestamp": {
+            ".validate": "!newData.exists() || newData.isNumber()"
+          },
+          "$other": {
+            ".validate": false
+          }
+        }
+      },
+
+      // Actuator Automation & Closed-Loop Control (Phase 7 ready)
+      "control": {
+        ".read": true,
+        ".write": "auth != null",
+        "aerator": {
+          ".validate": "!newData.exists() || newData.isBoolean()"
+        },
+        "feeder": {
+          ".validate": "!newData.exists() || newData.isBoolean()"
+        },
+        "pump": {
+          ".validate": "!newData.exists() || newData.isBoolean()"
+        },
+        "last_updated": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        }
+      },
+
+      // Gateway Health & Telemetry Diagnostics Node
+      "diagnostics": {
+        ".read": true,
+        ".write": "auth != null",
+        "uptime_sec": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "free_heap": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "wifi_rssi": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "serial_received": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "serial_dropped": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "packet_loss_pct": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "turbidity_v_clear": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        },
+        "timestamp": {
+          ".validate": "!newData.exists() || newData.isNumber()"
+        }
+      }
+    }
+  }
+}

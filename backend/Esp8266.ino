@@ -1,154 +1,277 @@
 /*
  * ==============================================================================
- * AQUA·INTELLIGENCE — NodeMCU ESP8266 IoT Gateway Firmware
+ * AQUA·INTELLIGENCE — NodeMCU ESP8266 IoT Gateway & Calibration Firmware
  * ==============================================================================
- * Microcontroller: NodeMCU ESP8266 (ESP-12E)
- * Peripherals & Interfaces:
- *   - Analog Turbidity Sensor on Pin A0 (ADC0, 0-3.3V)
- *   - SoftwareSerial (or Hardware RX on GPIO3 / D9) from Arduino Nano
- *   - Wi-Fi Telemetry & Firebase Realtime Database Client (Mobizt FirebaseESP8266)
+ * Microcontroller: NodeMCU ESP8266 (ESP-12E, 3.3V, 80/160MHz)
+ * Connected Peripherals:
+ *   - 16x2 I2C LCD Display (SDA: D2, SCL: D1)
+ *   - Analog Turbidity Sensor on Pin A0 (ADC0, 0-3.3V range)
+ *   - SoftwareSerial (RX: D7, TX: D8) linked to Arduino Nano (TX: D4)
+ *   - Hardware Serial RX (GPIO3) alternate link to Nano
+ *   - Wi-Fi Multi-AP Telemetry & Firebase Realtime Database Client
  * ==============================================================================
  */
 
 #include <ESP8266WiFi.h>
+#include <ESP8266WiFiMulti.h>
 #include <FirebaseESP8266.h>
 #include <SoftwareSerial.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <EEPROM.h>
 #include <time.h>
 
 // ------------------------------------------------------------------------------
-// Wi-Fi Credentials
+// Hardware Objects & Pin Definitions
 // ------------------------------------------------------------------------------
-#define WIFI_SSID         "Airtel_sahi_0849"
-#define WIFI_PASSWORD     "air99772"
+#define TURBIDITY_PIN            A0     // ESP8266 Analog pin (0 - 3.3V range)
+#define NANO_RX_PIN              D7     // GPIO13 (connected to Nano D4 TX)
+#define NANO_TX_PIN              D8     // GPIO15 (optional TX to Nano)
+
+#define PUSH_INTERVAL_MS         5000   // Push live sensor telemetry every 5 seconds
+#define HISTORY_PUSH_INTERVAL_MS 60000  // Archive to /aquaculture/history every 60 seconds
+#define LCD_INTERVAL_MS          1000   // Refresh LCD every 1 second
+
+// 16x2 I2C LCD Displays (auto-select 0x27 or 0x3F)
+LiquidCrystal_I2C lcd27(0x27, 16, 2);
+LiquidCrystal_I2C lcd3F(0x3F, 16, 2);
+LiquidCrystal_I2C* activeLcd = &lcd27;
+
+ESP8266WiFiMulti wifiMulti;
+SoftwareSerial nanoSerial(NANO_RX_PIN, NANO_TX_PIN); // RX, TX
 
 // ------------------------------------------------------------------------------
-// Firebase Project Configuration
+// Firebase Project Configuration (Matches Frontend Dashboard)
 // ------------------------------------------------------------------------------
 #define API_KEY           "AIzaSyASBjqw4cBHSQEUPtFolNvehRGglATpDTg"
-// IMPORTANT: Hostname only. Do NOT include "https://" or trailing "/"
-#define DATABASE_URL      "aquaculture-61982-default-rtdb.firebaseio.com"
+#define DATABASE_URL      "aquaculture-61982-default-rtdb.asia-southeast1.firebasedatabase.app"
 #define USER_EMAIL        "mr.karanchopkar01@gmail.com"
 #define USER_PASSWORD     "karan@9518"
 
-// ------------------------------------------------------------------------------
-// Hardware Pins & Parameters
-// ------------------------------------------------------------------------------
-#define TURBIDITY_PIN     A0    // ESP8266 Analog pin (0 - 1.0V internal / 0 - 3.3V module divider)
-#define NANO_RX_PIN       D7    // GPIO13 (RX pin connected to Nano D4 TX)
-#define NANO_TX_PIN       D8    // GPIO15 (TX pin optional)
-
-#define PUSH_INTERVAL_MS  5000  // Push telemetry to Firebase every 5 seconds
-
-// ------------------------------------------------------------------------------
-// Firebase & Serial Communication Objects
-// ------------------------------------------------------------------------------
 FirebaseData fbdo;
 FirebaseAuth auth;
-FirebaseConfig config;
-SoftwareSerial nanoSerial(NANO_RX_PIN, NANO_TX_PIN); // RX, TX
+FirebaseConfig fbConfig;
+
+// ------------------------------------------------------------------------------
+// EEPROM Calibration Configuration
+// ------------------------------------------------------------------------------
+#define EEPROM_MAGIC 0x4553 // 'ES'
+#define EEPROM_ADDR  0
+
+struct GatewayCalibration {
+  uint16_t magic;
+  float    turbidity_v_clear; // Voltage in clear reference water (0 NTU), typical 4.10V
+};
+
+GatewayCalibration cal;
 
 // ------------------------------------------------------------------------------
 // Telemetry Cache
 // ------------------------------------------------------------------------------
 float currentPH          = 7.00;
 float currentTemp        = 25.00;
-float currentTurbidity   = 5.00;
+float currentTurbidity   = 0.00;
 float currentEC          = 1.20;
+
 unsigned long lastPushTime = 0;
+unsigned long lastHistoryPushTime = 0;
+unsigned long lastLcdTime = 0;
+
+unsigned long serialPacketsReceived = 0;
+unsigned long serialPacketsDropped  = 0;
 String serialBuffer = "";
+String cliBuffer = "";
 
 // ------------------------------------------------------------------------------
-// Helper: Read Turbidity in NTU from Pin A0
+// Helper: Load or Initialize EEPROM Calibration
 // ------------------------------------------------------------------------------
-float readTurbidity() {
-  long sum = 0;
-  const int samples = 20;
-
-  for (int i = 0; i < samples; i++) {
-    sum += analogRead(TURBIDITY_PIN);
-    delay(5);
-  }
-
-  float avgAdc = (float)sum / samples;
-  float voltage = (avgAdc / 1024.0) * 3.3; // ESP8266 ADC reference (0-3.3V)
-
-  // Standard optical turbidity formula approximation
-  // Voltage drops as water becomes more turbid
-  float ntu = 0.0;
-  if (voltage < 2.5) {
-    ntu = 3000.0;
-  } else if (voltage >= 4.2) {
-    ntu = 0.0;
+void loadGatewayCalibration() {
+  EEPROM.begin(64);
+  EEPROM.get(EEPROM_ADDR, cal);
+  if (cal.magic != EEPROM_MAGIC) {
+    Serial.println(F("[CAL] Initializing factory turbidity calibration baseline (4.15V)."));
+    cal.magic = EEPROM_MAGIC;
+    cal.turbidity_v_clear = 4.15;
+    EEPROM.put(EEPROM_ADDR, cal);
+    EEPROM.commit();
   } else {
-    ntu = -1120.4 * (voltage * voltage) + 5742.3 * voltage - 4353.8;
+    Serial.print(F("[CAL] Restored Turbidity Clear Baseline: "));
+    Serial.print(cal.turbidity_v_clear, 3);
+    Serial.println(F(" V"));
   }
+}
 
-  // Constrain to reasonable pond telemetry bounds (0.0 to 50.0 NTU)
-  if (ntu < 0.5) ntu = 0.5;
-  if (ntu > 30.0) ntu = 30.0;
-
-  return ntu;
+void saveGatewayCalibration() {
+  cal.magic = EEPROM_MAGIC;
+  EEPROM.put(EEPROM_ADDR, cal);
+  EEPROM.commit();
+  Serial.println(F("[CAL] Turbidity calibration saved to EEPROM."));
 }
 
 // ------------------------------------------------------------------------------
-// Helper: Estimate Electrical Conductivity (EC in mS/cm)
+// Turbidity Sensing & EC Estimation
 // ------------------------------------------------------------------------------
+float readAverageTurbidityVoltage(int samples = 30) {
+  long sum = 0;
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(TURBIDITY_PIN);
+    delay(4);
+  }
+  float avgAdc = (float)sum / samples;
+  return (avgAdc / 1023.0) * 3.3;
+}
+
+float readCalibratedTurbidity() {
+  float voltage = readAverageTurbidityVoltage();
+  float vClear = (cal.turbidity_v_clear > 1.5) ? cal.turbidity_v_clear : 3.00;
+  float normalizedV = voltage * (4.15 / vClear);
+
+  float ntu = 0.0;
+  if (normalizedV >= 4.10) {
+    ntu = 0.0; // Crystal clear
+  } else if (normalizedV < 2.50) {
+    ntu = 50.0;
+  } else {
+    ntu = -1120.4 * (normalizedV * normalizedV) + 5742.3 * normalizedV - 4353.8;
+  }
+
+  if (ntu < 0.0) ntu = 0.0;
+  if (ntu > 50.0) ntu = 50.0;
+  return ntu;
+}
+
 float estimateEC(float turbidity, float tempC) {
-  // Estimated relation based on suspended solids and temp compensation
-  float baseEC = 0.8 + (turbidity * 0.08);
-  float tempFactor = 1.0 + 0.019 * (tempC - 25.0); // 1.9% per °C standard compensation
+  float baseEC = 0.80 + (turbidity * 0.08);
+  float tempFactor = 1.0 + 0.019 * (tempC - 25.0);
   float ec = baseEC * tempFactor;
-  if (ec < 0.2) ec = 0.2;
-  if (ec > 5.0) ec = 5.0;
+  if (ec < 0.20) ec = 0.20;
+  if (ec > 5.00) ec = 5.00;
   return ec;
 }
 
 // ------------------------------------------------------------------------------
-// Helper: Parse Incoming Serial Line from Arduino Nano
-// Format expected: DATA:<ph>,<temp>
+// XOR Checksum Validation
+// ------------------------------------------------------------------------------
+uint8_t calculateChecksum(const String &str) {
+  uint8_t cs = 0;
+  for (unsigned int i = 0; i < str.length(); i++) {
+    cs ^= (uint8_t)str.charAt(i);
+  }
+  return cs;
+}
+
+// ------------------------------------------------------------------------------
+// Serial Parser for Nano Telemetry (Supports checksummed, labeled, and raw formats)
 // ------------------------------------------------------------------------------
 void parseSerialTelemetry(String line) {
   line.trim();
+  if (line.length() == 0) return;
+
+  float parsedPH = -1.0;
+  float parsedTemp = -99.0;
+  bool found = false;
+
+  // 1. Check for standard DATA: prefix
   if (line.startsWith("DATA:")) {
-    String payload = line.substring(5);
-    int commaIndex = payload.indexOf(',');
-    if (commaIndex > 0) {
-      String phStr = payload.substring(0, commaIndex);
-      String tempStr = payload.substring(commaIndex + 1);
+    String content = line.substring(5);
 
-      float parsedPH = phStr.toFloat();
-      float parsedTemp = tempStr.toFloat();
-
-      if (parsedPH >= 0.0 && parsedPH <= 14.0) {
-        currentPH = parsedPH;
+    // Verify Checksum if present ('*')
+    int starIdx = content.indexOf('*');
+    if (starIdx > 0) {
+      String payload = content.substring(0, starIdx);
+      String csStr = content.substring(starIdx + 1);
+      uint8_t expectedCs = (uint8_t)strtol(csStr.c_str(), NULL, 16);
+      uint8_t actualCs = calculateChecksum(payload);
+      if (expectedCs == actualCs) {
+        content = payload;
       }
-      if (parsedTemp >= -5.0 && parsedTemp <= 55.0) {
-        currentTemp = parsedTemp;
-      }
-
-      Serial.print(F("[NANO SERIAL INGEST] pH: "));
-      Serial.print(currentPH, 2);
-      Serial.print(F(" | Temp: "));
-      Serial.print(currentTemp, 2);
-      Serial.println(F(" C"));
     }
+
+    int commaIndex = content.indexOf(',');
+    if (commaIndex > 0) {
+      String phPart = content.substring(0, commaIndex);
+      String tempPart = content.substring(commaIndex + 1);
+
+      phPart.replace("pH:", ""); phPart.replace("PH:", ""); phPart.replace("ph:", ""); phPart.trim();
+      tempPart.replace("Temp:", ""); tempPart.replace("TEMP:", ""); tempPart.replace("T:", ""); tempPart.trim();
+
+      parsedPH = phPart.toFloat();
+      parsedTemp = tempPart.toFloat();
+      found = true;
+    }
+  }
+
+  // 2. Fallback: Parse labeled line like "pH : 4.00 | Temp : 32.30 C"
+  if (!found) {
+    int phPos = line.indexOf("pH");
+    int tempPos = line.indexOf("Temp");
+    if (tempPos == -1) tempPos = line.indexOf("temp");
+
+    if (phPos != -1 && tempPos != -1) {
+      int colonPh = line.indexOf(':', phPos);
+      if (colonPh != -1) {
+        parsedPH = line.substring(colonPh + 1).toFloat();
+      }
+      int colonTemp = line.indexOf(':', tempPos);
+      if (colonTemp != -1) {
+        parsedTemp = line.substring(colonTemp + 1).toFloat();
+      }
+      if (parsedPH >= 0.0 && parsedTemp > -20.0) {
+        found = true;
+      }
+    }
+  }
+
+  // Biological validity bounds
+  if (found && parsedPH >= 0.0 && parsedPH <= 14.0 && parsedTemp >= -10.0 && parsedTemp <= 60.0) {
+    currentPH = parsedPH;
+    currentTemp = parsedTemp;
+    serialPacketsReceived++;
+    Serial.print(F("[NANO RX] pH="));
+    Serial.print(currentPH, 2);
+    Serial.print(F(", Temp="));
+    Serial.println(currentTemp, 1);
+  } else {
+    serialPacketsDropped++;
   }
 }
 
 // ------------------------------------------------------------------------------
-// Helper: Push Telemetry JSON to Firebase Realtime Database
+// LCD Display Update (16x2 Layout matching hardware photo)
+// ------------------------------------------------------------------------------
+void updateDisplay() {
+  activeLcd->setCursor(0, 0);
+  activeLcd->print(F("pH:"));
+  activeLcd->print(currentPH, 2);
+  activeLcd->print(F(" T:"));
+  activeLcd->print(currentTemp, 1);
+  activeLcd->print((char)223);
+  activeLcd->print(F("C   "));
+
+  activeLcd->setCursor(0, 1);
+  int turbInt = (int)currentTurbidity;
+  activeLcd->print(F("Turb:"));
+  activeLcd->print(turbInt);
+  activeLcd->print(F("% "));
+
+  if (turbInt <= 20)      activeLcd->print(F("CLEAR "));
+  else if (turbInt <= 50) activeLcd->print(F("CLOUDY"));
+  else                    activeLcd->print(F("DIRTY "));
+  activeLcd->print(F("  "));
+}
+
+// ------------------------------------------------------------------------------
+// Firebase Push Telemetry
 // ------------------------------------------------------------------------------
 void pushTelemetryToFirebase() {
-  if (!Firebase.ready()) {
-    Serial.println(F("[WARN] Firebase is not ready yet. Skipping push."));
-    return;
-  }
+  if (!Firebase.ready()) return;
 
-  currentTurbidity = readTurbidity();
+  currentTurbidity = readCalibratedTurbidity();
   currentEC = estimateEC(currentTurbidity, currentTemp);
+
   unsigned long timestamp = (unsigned long)time(nullptr);
   if (timestamp < 100000) {
-    timestamp = millis() / 1000; // Fallback relative epoch
+    timestamp = millis() / 1000;
   }
 
   FirebaseJson json;
@@ -158,13 +281,26 @@ void pushTelemetryToFirebase() {
   json.set("ec", currentEC);
   json.set("timestamp", (int)timestamp);
 
-  // Note: Path MUST NOT contain .json!
+  // 1. Live Realtime Telemetry (/aquaculture/sensors)
   if (Firebase.setJSON(fbdo, "/aquaculture/sensors", json)) {
-    Serial.print(F("[FIREBASE PUSH SUCCESS] Node: /aquaculture/sensors | Payload: "));
-    Serial.println(fbdo.raw());
+    Serial.print(F("[FIREBASE LIVE] pH="));
+    Serial.print(currentPH, 2);
+    Serial.print(F(" | Temp="));
+    Serial.print(currentTemp, 1);
+    Serial.print(F(" | Turb="));
+    Serial.print(currentTurbidity, 1);
+    Serial.print(F(" | EC="));
+    Serial.println(currentEC, 2);
   } else {
-    Serial.print(F("[FIREBASE PUSH ERROR] Reason: "));
+    Serial.print(F("[FIREBASE ERROR] "));
     Serial.println(fbdo.errorReason());
+  }
+
+  // 2. Historical Archival (/aquaculture/history)
+  unsigned long now = millis();
+  if (now - lastHistoryPushTime >= HISTORY_PUSH_INTERVAL_MS || lastHistoryPushTime == 0) {
+    lastHistoryPushTime = now;
+    Firebase.pushJSON(fbdo, "/aquaculture/history", json);
   }
 }
 
@@ -172,67 +308,97 @@ void pushTelemetryToFirebase() {
 // Setup
 // ------------------------------------------------------------------------------
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(9600);
+  nanoSerial.begin(9600);
   delay(500);
 
-  Serial.println();
-  Serial.println(F("========================================"));
-  Serial.println(F(" AQUA-INTELLIGENCE: ESP8266 IoT Gateway "));
-  Serial.println(F("========================================"));
+  Serial.println(F("\n=================================================="));
+  Serial.println(F(" AQUA·INTELLIGENCE ESP8266 IoT Gateway Firmware   "));
+  Serial.println(F("=================================================="));
 
-  // Initialize SoftwareSerial to Arduino Nano
-  nanoSerial.begin(9600);
+  // Initialize I2C Bus on standard ESP8266 pins: SDA=D2, SCL=D1
+  Wire.begin(D2, D1);
 
-  // Connect to Wi-Fi
-  Serial.print(F("[WIFI] Connecting to "));
-  Serial.println(WIFI_SSID);
+  // Auto-detect LCD address (0x27 or 0x3F)
+  Wire.beginTransmission(0x27);
+  if (Wire.endTransmission() == 0) {
+    activeLcd = &lcd27;
+    Serial.println(F("[I2C] LCD 16x2 detected at 0x27"));
+  } else {
+    Wire.beginTransmission(0x3F);
+    if (Wire.endTransmission() == 0) {
+      activeLcd = &lcd3F;
+      Serial.println(F("[I2C] LCD 16x2 detected at 0x3F"));
+    } else {
+      activeLcd = &lcd27;
+      Serial.println(F("[I2C WARN] Defaulting to 0x27."));
+    }
+  }
+
+  activeLcd->init();
+  activeLcd->backlight();
+  activeLcd->clear();
+  activeLcd->setCursor(0, 0); activeLcd->print(F("ESP8266 Aqua"));
+  activeLcd->setCursor(0, 1); activeLcd->print(F("Connecting WiFi"));
+
+  loadGatewayCalibration();
+
+  // Multi-AP Wi-Fi Connection
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  wifiMulti.addAP("Airtel_sahi_0849", "air99772");
+  wifiMulti.addAP("Om", "95273787");
+  wifiMulti.addAP("Ganesh🪐", "asdfghjkl");
 
-  int wifiRetries = 0;
-  while (WiFi.status() != WL_CONNECTED && wifiRetries < 40) {
+  Serial.print(F("[WIFI] Connecting to Wi-Fi"));
+  int retries = 0;
+  while (wifiMulti.run() != WL_CONNECTED && retries < 30) {
     delay(500);
     Serial.print(F("."));
-    wifiRetries++;
+    retries++;
   }
 
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println();
-    Serial.print(F("[WIFI] Connected! IP Address: "));
+    Serial.print(F("[WIFI] Connected! IP: "));
     Serial.println(WiFi.localIP());
+
+    activeLcd->clear();
+    activeLcd->setCursor(0, 0); activeLcd->print(F("IP:"));
+    activeLcd->print(WiFi.localIP());
+    activeLcd->setCursor(0, 1); activeLcd->print(F("WiFi Connected!"));
+    delay(2000);
   } else {
-    Serial.println();
-    Serial.println(F("[WIFI WARN] Initial Wi-Fi connection timed out. Will auto-reconnect in loop."));
+    Serial.println(F("\n[WIFI WARN] Connection in progress..."));
   }
 
-  // Synchronize SNTP time for accurate timestamps
-  configTime(5.5 * 3600, 0, "pool.ntp.org", "time.nist.gov"); // IST UTC+5:30
+  // NTP Time Sync
+  configTime(5.5 * 3600, 0, "pool.ntp.org", "time.nist.gov");
 
-  // Configure Firebase Client
-  config.api_key = API_KEY;
-  config.database_url = DATABASE_URL;
+  // Firebase Setup
+  fbConfig.api_key = API_KEY;
+  fbConfig.database_url = DATABASE_URL;
   auth.user.email = USER_EMAIL;
   auth.user.password = USER_PASSWORD;
 
-  // Recommended connection & buffer settings for ESP8266 stability
-  config.token_status_callback = [](TokenInfo info) {
+  fbConfig.token_status_callback = [](TokenInfo info) {
     if (info.status == token_status_ready) {
-      Serial.println(F("[FIREBASE AUTH] Token is ready!"));
+      Serial.println(F("[FIREBASE AUTH] Token Ready!"));
     }
   };
   fbdo.setResponseSize(1024);
 
-  Firebase.begin(&config, &auth);
+  Firebase.begin(&fbConfig, &auth);
   Firebase.reconnectWiFi(true);
 
-  Serial.println(F("[INIT] Setup complete. Listening for sensor telemetry..."));
+  activeLcd->clear();
+  Serial.println(F("[INIT] ESP8266 Gateway initialized and ready."));
 }
 
 // ------------------------------------------------------------------------------
 // Main Loop
 // ------------------------------------------------------------------------------
 void loop() {
-  // 1. Process incoming serial data from Arduino Nano
+  // 1. Read from Nano over SoftwareSerial (D7)
   while (nanoSerial.available()) {
     char c = (char)nanoSerial.read();
     if (c == '\n') {
@@ -243,8 +409,27 @@ void loop() {
     }
   }
 
-  // 2. Periodic Cloud Telemetry Push
+  // 2. Read from Nano or Console over Hardware Serial (RX)
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (cliBuffer.length() > 0) {
+        parseSerialTelemetry(cliBuffer);
+        cliBuffer = "";
+      }
+    } else {
+      cliBuffer += c;
+    }
+  }
+
+  // 3. Update LCD Display every 1 second
   unsigned long now = millis();
+  if (now - lastLcdTime >= LCD_INTERVAL_MS) {
+    lastLcdTime = now;
+    updateDisplay();
+  }
+
+  // 4. Push Live Telemetry to Firebase every 5 seconds
   if (now - lastPushTime >= PUSH_INTERVAL_MS) {
     lastPushTime = now;
     pushTelemetryToFirebase();

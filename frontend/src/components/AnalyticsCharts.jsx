@@ -7,6 +7,8 @@ import {
 } from 'recharts';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Clock, Waves } from 'lucide-react';
+import { ref, query, limitToLast, get } from 'firebase/database';
+import { db } from '../lib/firebase';
 
 const PARAM_CONFIG = {
   ph:          { label: 'pH',          color: '#60a5fa', unit: '',      dot: '⚗️' },
@@ -50,6 +52,40 @@ export default function AnalyticsCharts({ sensors, active }) {
   const [window_, setWindow_] = useState(TIME_WINDOWS[0]);
   const [activeParams, setActiveParams] = useState({ ph: true, temperature: true, turbidity: true });
   const tickRef = useRef(0);
+
+  // Hydrate initial chart history from Firebase Realtime Database on mount
+  useEffect(() => {
+    let isMounted = true;
+    async function loadFirebaseHistory() {
+      try {
+        const histQuery = query(ref(db, '/aquaculture/history'), limitToLast(60));
+        const snapshot = await get(histQuery);
+        if (isMounted && snapshot.exists()) {
+          const val = snapshot.val();
+          const loadedPoints = Object.entries(val).map(([id, pt], idx) => {
+            const dateObj = pt.timestamp ? new Date(pt.timestamp * 1000) : new Date();
+            const timeLabel = dateObj.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            return {
+              id,
+              time: timeLabel,
+              ph: parseFloat(pt.ph ?? 7.0),
+              temperature: parseFloat(pt.temperature ?? 25.0),
+              turbidity: parseFloat(pt.turbidity ?? 5.0),
+              tick: idx,
+            };
+          });
+          if (loadedPoints.length > 0) {
+            setHistory(loadedPoints);
+            tickRef.current = loadedPoints.length;
+          }
+        }
+      } catch (err) {
+        console.warn('[AnalyticsCharts] History hydration fallback to live stream:', err.message);
+      }
+    }
+    loadFirebaseHistory();
+    return () => { isMounted = false; };
+  }, []);
 
   // Append incoming sensor data to rolling history
   useEffect(() => {

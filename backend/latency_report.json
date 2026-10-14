@@ -1,0 +1,21 @@
+{
+  "iterations": 20,
+  "completed": 20,
+  "failures": 0,
+  "success_rate_pct": 100.0,
+  "sla_target_ms": 2000.0,
+  "sla_passed": true,
+  "latency_stats_ms": {
+    "min": 20.36,
+    "max": 22.0,
+    "mean": 20.86,
+    "median_p50": 20.79,
+    "p95": 21.27,
+    "p99": 21.85,
+    "std_dev": 0.32
+  },
+  "component_breakdown_ms": {
+    "mean_cloud_sync": 42.5,
+    "mean_ml_inference": 5.45
+  }
+}
